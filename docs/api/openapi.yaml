@@ -1,0 +1,1192 @@
+openapi: 3.1.0
+info:
+  title: Dead Drop API
+  version: 0.1.0
+  summary: Digital time-capsule platform REST API.
+  description: |
+    Logical REST contract for the Dead Drop MVP (see `docs/srs.md`).
+
+    **Error model.** Every non-2xx response uses `application/problem+json`
+    ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)) extended with a stable
+    machine-readable `code`, a `traceId`, and optional field-level `errors`.
+    Error bodies never contain capsule text. See `docs/error-handling.md` for the
+    full catalog and status-selection rules.
+
+    **Status selection.**
+    * `400` – malformed request: invalid JSON, wrong types, unknown fields, missing headers.
+    * `401` – missing, expired, or revoked authentication.
+    * `403` – authenticated but the action is not allowed for this identity or account state.
+    * `404` – resource does not exist **or** the caller has no relationship to it (anti-enumeration).
+    * `409` – request is valid but conflicts with the current resource state.
+    * `412` – `If-Match` ETag no longer matches (concurrent edit).
+    * `422` – syntactically valid request that violates business rules.
+    * `429` – rate limit exceeded; honor `Retry-After`.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://deaddrop.example/api/v1
+    description: Deployed single-host environment
+  - url: http://localhost:8080/api/v1
+    description: Local Docker Compose
+tags:
+  - name: Auth
+    description: Registration, verification, sessions, recovery (REQ-FUNC-001…004).
+  - name: Capsules
+    description: Owner capsule lifecycle (REQ-FUNC-005…014).
+  - name: Participation
+    description: Approvals, check-in, received content (REQ-FUNC-016, 019, 022, 023).
+  - name: Notifications
+    description: In-app notices (REQ-FUNC-024).
+  - name: Admin
+    description: Restricted operational administration (REQ-FUNC-026, 027).
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: registerAccount
+      summary: Register an account
+      description: Creates an unverified account and sends a verification email. The response is identical whether or not the email already exists, to prevent account enumeration (REQ-FUNC-001, REQ-SEC-005).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '202':
+          description: Registration accepted; verification email queued.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422':
+          description: Business validation failed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                weakPassword: { $ref: '#/components/examples/WeakPassword' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      operationId: verifyEmail
+      summary: Verify email ownership
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 32, maxLength: 256 }
+      responses:
+        '204':
+          description: Email verified.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: Email already verified.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                alreadyVerified: { $ref: '#/components/examples/EmailAlreadyVerified' }
+        '422':
+          description: Token is expired or invalid.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                tokenExpired: { $ref: '#/components/examples/TokenExpired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Authenticate and start a session
+      description: Returns a 15-minute access token and sets a rotating refresh token cookie valid for at most 7 days from login (REQ-FUNC-003, REQ-SEC-001).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated.
+          headers:
+            Set-Cookie:
+              description: '`refresh_token`; Secure; HttpOnly; SameSite=Strict; Path=/api/v1/auth'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Credentials are invalid (generic message, no hint which field is wrong).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                invalidCredentials: { $ref: '#/components/examples/InvalidCredentials' }
+        '403':
+          description: Account cannot log in in its current state.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                suspended: { $ref: '#/components/examples/AccountSuspended' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshSession
+      summary: Rotate the refresh token and obtain a new access token
+      description: Cookie-authenticated; requires a CSRF header and a matching Origin. Replaying an already-rotated refresh token revokes the whole session family.
+      security:
+        - refreshCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: New access token issued; refresh cookie rotated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Refresh token missing, expired, reused, or session revoked.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                revoked: { $ref: '#/components/examples/SessionRevoked' }
+        '403':
+          description: CSRF token or Origin check failed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                csrf: { $ref: '#/components/examples/CsrfFailed' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Revoke the current session
+      security:
+        - refreshCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Session revoked; refresh cookie cleared. Repeating logout is safe.
+        '403':
+          description: CSRF token or Origin check failed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                csrf: { $ref: '#/components/examples/CsrfFailed' }
+
+  /auth/password-reset:
+    post:
+      tags: [Auth]
+      operationId: requestPasswordReset
+      summary: Request a password-reset email
+      description: Always answers 202 to avoid account enumeration (REQ-FUNC-004).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+      responses:
+        '202':
+          description: If the account exists, a reset email is queued.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /capsules:
+    get:
+      tags: [Capsules]
+      operationId: listOwnedCapsules
+      summary: List capsules owned by the caller
+      parameters:
+        - name: state
+          in: query
+          schema: { $ref: '#/components/schemas/CapsuleState' }
+        - $ref: '#/components/parameters/PageCursor'
+        - $ref: '#/components/parameters/PageLimit'
+      responses:
+        '200':
+          description: Page of owned capsules (summaries only).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/CapsuleSummary' }
+                  nextCursor: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    post:
+      tags: [Capsules]
+      operationId: createDraft
+      summary: Create a draft capsule
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CapsuleWrite' }
+      responses:
+        '201':
+          description: Draft created.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Location:
+              schema: { type: string, format: uri-reference }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capsule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account is not verified or is suspended.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                notVerified: { $ref: '#/components/examples/EmailNotVerified' }
+        '409':
+          description: Idempotency key reused with a different payload.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                idempotencyMismatch: { $ref: '#/components/examples/IdempotencyKeyReused' }
+        '422':
+          description: Content limits violated (REQ-FUNC-006).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                tooLong: { $ref: '#/components/examples/MessageTooLong' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /capsules/{capsuleId}:
+    parameters:
+      - $ref: '#/components/parameters/CapsuleId'
+    get:
+      tags: [Capsules]
+      operationId: getOwnedCapsule
+      summary: Get an owned capsule with its policy and status
+      responses:
+        '200':
+          description: Capsule owned by the caller.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capsule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    patch:
+      tags: [Capsules]
+      operationId: updateCapsule
+      summary: Edit a capsule before release
+      description: Editing an ACTIVE capsule pauses it and invalidates approvals and warnings (REQ-FUNC-012). Requires the current ETag (optimistic concurrency).
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/CapsuleWrite' }
+      responses:
+        '200':
+          description: Updated; state is DRAFT or PAUSED.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capsule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Capsule is already released and immutable.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                released: { $ref: '#/components/examples/CapsuleAlreadyReleased' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '422':
+          description: Content, recipient, or approver rules violated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                ownerAsApprover: { $ref: '#/components/examples/OwnerCannotApprove' }
+                tooLong: { $ref: '#/components/examples/MessageTooLong' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    delete:
+      tags: [Capsules]
+      operationId: deleteCapsule
+      summary: Delete an owned capsule
+      description: Immediately denies all access; content is purged within 30 days. Repeating the request is safe (REQ-FUNC-014).
+      responses:
+        '204':
+          description: Deleted (or already deleted by this owner).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /capsules/{capsuleId}/activate:
+    parameters:
+      - $ref: '#/components/parameters/CapsuleId'
+    post:
+      tags: [Capsules]
+      operationId: activateCapsule
+      summary: Activate a draft or paused capsule
+      description: Validates the full release policy, creates a new activation, clears earlier approvals and warnings, and records invitations durably (REQ-FUNC-010, 011).
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Capsule is ACTIVE with a new activation id.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capsule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Owner email not verified or account suspended.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                notVerified: { $ref: '#/components/examples/EmailNotVerified' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: State or capacity conflict.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                released: { $ref: '#/components/examples/CapsuleAlreadyReleased' }
+                alreadyActive: { $ref: '#/components/examples/CapsuleAlreadyActive' }
+                slotLimit: { $ref: '#/components/examples/ActiveCapsuleLimit' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '422':
+          description: Policy is incomplete or invalid.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                pastDate: { $ref: '#/components/examples/ReleaseDateInPast' }
+                noConditions: { $ref: '#/components/examples/PolicyIncomplete' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /capsules/{capsuleId}/pause:
+    parameters:
+      - $ref: '#/components/parameters/CapsuleId'
+    post:
+      tags: [Capsules]
+      operationId: pauseCapsule
+      summary: Pause an active capsule
+      description: Stops evaluation and invalidates current-activation approvals and warnings (REQ-FUNC-013). If release committed first, returns 409 with the released state.
+      responses:
+        '200':
+          description: Capsule is PAUSED.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capsule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Capsule is not ACTIVE.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                released: { $ref: '#/components/examples/CapsuleAlreadyReleased' }
+                notActive: { $ref: '#/components/examples/CapsuleNotActive' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /approvals/{approvalId}:
+    parameters:
+      - name: approvalId
+        in: path
+        required: true
+        description: Approval assignment id bound to one activation and one approver.
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Participation]
+      operationId: approveRelease
+      summary: Record the caller's approval for the current activation
+      description: Repeating the approval is idempotent and does not add weight (REQ-FUNC-016). Approvals cannot be withdrawn.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activationId]
+              properties:
+                activationId:
+                  type: string
+                  format: uuid
+                  description: Activation the approver saw; must equal the capsule's current activation.
+      responses:
+        '200':
+          description: Approval recorded (or already recorded).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is not the designated approver or is not verified.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                notApprover: { $ref: '#/components/examples/NotDesignatedApprover' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Approval refers to an earlier activation or the capsule is not ACTIVE.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                stale: { $ref: '#/components/examples/ActivationStale' }
+                notActive: { $ref: '#/components/examples/CapsuleNotActive' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /me/check-in:
+    post:
+      tags: [Participation]
+      operationId: checkIn
+      summary: Perform an account-wide check-in
+      description: Resets the inactivity baseline of every ACTIVE owned capsule and clears warning progress (REQ-FUNC-019). Released capsules are never relocked.
+      responses:
+        '200':
+          description: Check-in committed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checkedInAt, affectedCapsules]
+                properties:
+                  checkedInAt: { type: string, format: date-time }
+                  affectedCapsules: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account is not verified or is suspended.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                suspended: { $ref: '#/components/examples/AccountSuspended' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /received/{capsuleId}/content:
+    parameters:
+      - $ref: '#/components/parameters/CapsuleId'
+    get:
+      tags: [Participation]
+      operationId: readReleasedContent
+      summary: Read a released capsule as a recipient
+      description: Only verified recipients with a non-removed grant can read RELEASED capsules (REQ-FUNC-022). A locked capsule returns 403 with no preview; an unrelated capsule returns 404.
+      responses:
+        '200':
+          description: Released message.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: 'no-store' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReleasedContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is a recipient but content is still locked or access was removed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                locked: { $ref: '#/components/examples/CapsuleLocked' }
+                removed: { $ref: '#/components/examples/AccessRemoved' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: List in-app notices for the caller
+      parameters:
+        - name: unread
+          in: query
+          schema: { type: boolean }
+        - $ref: '#/components/parameters/PageCursor'
+        - $ref: '#/components/parameters/PageLimit'
+      responses:
+        '200':
+          description: Page of notices (generic text, no capsule content).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notification' }
+                  nextCursor: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /admin/accounts/{accountId}/suspension:
+    parameters:
+      - name: accountId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [Admin]
+      operationId: suspendAccount
+      summary: Suspend an account
+      description: Revokes sessions and pauses the owner's ACTIVE capsules (REQ-FUNC-027). Administrators never see message text.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        '200':
+          description: Account suspended (idempotent).
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is not an administrator or tries to suspend themselves.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                notAdmin: { $ref: '#/components/examples/AdminRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    delete:
+      tags: [Admin]
+      operationId: restoreAccount
+      summary: Restore a suspended account
+      description: Restoration never auto-activates capsules.
+      responses:
+        '204':
+          description: Account restored.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is not an administrator.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                notAdmin: { $ref: '#/components/examples/AdminRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Account is not suspended.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                notSuspended: { $ref: '#/components/examples/AccountNotSuspended' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 15-minute access token kept in browser memory only.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Rotating refresh token in a Secure, HttpOnly, SameSite=Strict cookie.
+
+  parameters:
+    CapsuleId:
+      name: capsuleId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: ETag from the last read of the capsule; protects against lost updates.
+      schema: { type: string, example: 'W/"capsule-7"' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated UUID. A retry with the same key and payload returns the original result for 24 hours.
+      schema: { type: string, format: uuid }
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: { type: string }
+    PageCursor:
+      name: cursor
+      in: query
+      schema: { type: string, maxLength: 200 }
+    PageLimit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  headers:
+    ETag:
+      description: Weak entity tag derived from the capsule version.
+      schema: { type: string, example: 'W/"capsule-8"' }
+    RetryAfter:
+      description: Seconds until the client may retry.
+      schema: { type: integer, minimum: 1 }
+    RateLimitLimit:
+      description: Requests allowed in the current window.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Requests remaining in the current window.
+      schema: { type: integer }
+    RateLimitReset:
+      description: Seconds until the window resets.
+      schema: { type: integer }
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with Dead Drop extensions.
+      required: [type, title, status, code, traceId]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Stable documentation URI for the error code.
+          example: https://deaddrop.example/errors/capsule-already-released
+        title:
+          type: string
+          description: Short human-readable summary; constant per code.
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        detail:
+          type: string
+          description: Explanation for this occurrence. Never contains capsule text or secrets.
+        instance:
+          type: string
+          format: uri-reference
+          description: Request path that produced the error.
+        traceId:
+          type: string
+          description: Correlates the response with server logs and audit metadata.
+        errors:
+          type: array
+          description: Field-level validation problems (400/422).
+          items: { $ref: '#/components/schemas/FieldError' }
+        retryAfter:
+          type: integer
+          description: Seconds to wait (429/503); mirrors the Retry-After header.
+    FieldError:
+      type: object
+      required: [field, code, message]
+      properties:
+        field:
+          type: string
+          description: JSON Pointer to the offending field.
+          example: /policy/releaseAt
+        code: { type: string, example: MUST_BE_FUTURE }
+        message: { type: string }
+    ErrorCode:
+      type: string
+      enum:
+        - MALFORMED_REQUEST
+        - VALIDATION_FAILED
+        - AUTHENTICATION_REQUIRED
+        - INVALID_CREDENTIALS
+        - SESSION_REVOKED
+        - CSRF_FAILED
+        - EMAIL_NOT_VERIFIED
+        - EMAIL_ALREADY_VERIFIED
+        - TOKEN_EXPIRED
+        - ACCOUNT_SUSPENDED
+        - ACCOUNT_NOT_SUSPENDED
+        - ADMIN_REQUIRED
+        - NOT_DESIGNATED_APPROVER
+        - OWNER_CANNOT_APPROVE
+        - RESOURCE_NOT_FOUND
+        - CAPSULE_ALREADY_RELEASED
+        - CAPSULE_ALREADY_ACTIVE
+        - CAPSULE_NOT_ACTIVE
+        - CAPSULE_LOCKED
+        - ACCESS_REMOVED
+        - ACTIVATION_STALE
+        - ACTIVE_CAPSULE_LIMIT
+        - IDEMPOTENCY_KEY_REUSED
+        - VERSION_MISMATCH
+        - PRECONDITION_REQUIRED
+        - MESSAGE_TOO_LONG
+        - WEAK_PASSWORD
+        - RELEASE_DATE_IN_PAST
+        - POLICY_INCOMPLETE
+        - RATE_LIMITED
+        - SERVICE_UNAVAILABLE
+        - INTERNAL_ERROR
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 12, maxLength: 128, writeOnly: true }
+        displayName: { type: string, maxLength: 80 }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, maxLength: 128, writeOnly: true }
+    TokenResponse:
+      type: object
+      required: [accessToken, expiresIn, tokenType]
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, const: Bearer }
+        expiresIn: { type: integer, const: 900, description: Seconds. }
+    CapsuleState:
+      type: string
+      enum: [DRAFT, ACTIVE, PAUSED, RELEASED]
+    ConditionType:
+      type: string
+      enum: [DATE, APPROVAL, INACTIVITY]
+    ReleasePolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        operator:
+          type: string
+          enum: [ALL, ANY]
+        conditions:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/ConditionType' }
+        releaseAt:
+          type: string
+          format: date-time
+          description: Required for DATE; must be in the future and within five years; explicit offset required.
+        inactivityDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Required for INACTIVITY; a seven-day grace period follows the warning.
+    CapsuleWrite:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: string, maxLength: 120 }
+        message: { type: string, maxLength: 20000 }
+        recipients:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items: { type: string, format: email }
+        approvers:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items: { type: string, format: email }
+        policy: { $ref: '#/components/schemas/ReleasePolicy' }
+    CapsuleSummary:
+      type: object
+      required: [id, title, state, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        state: { $ref: '#/components/schemas/CapsuleState' }
+        updatedAt: { type: string, format: date-time }
+    Capsule:
+      allOf:
+        - $ref: '#/components/schemas/CapsuleSummary'
+        - $ref: '#/components/schemas/CapsuleWrite'
+        - type: object
+          properties:
+            version: { type: integer, minimum: 1 }
+            activationId: { type: [string, 'null'], format: uuid }
+            activatedAt: { type: [string, 'null'], format: date-time }
+            releasedAt: { type: [string, 'null'], format: date-time }
+            conditionStatus:
+              type: object
+              description: Satisfied/pending flag per selected condition (REQ-FUNC-030).
+              additionalProperties: { type: boolean }
+    Approval:
+      type: object
+      required: [approvalId, activationId, approvedAt]
+      properties:
+        approvalId: { type: string, format: uuid }
+        activationId: { type: string, format: uuid }
+        approvedAt: { type: string, format: date-time }
+    ReleasedContent:
+      type: object
+      required: [capsuleId, title, message, releasedAt]
+      properties:
+        capsuleId: { type: string, format: uuid }
+        title: { type: string }
+        message: { type: string }
+        releasedAt: { type: string, format: date-time }
+        ownerDisplayName: { type: string }
+    Notification:
+      type: object
+      required: [id, kind, createdAt, read]
+      properties:
+        id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [INVITATION, APPROVAL_REQUEST, INACTIVITY_WARNING, CAPSULE_RELEASED, ACCOUNT_NOTICE]
+        capsuleId: { type: [string, 'null'], format: uuid }
+        createdAt: { type: string, format: date-time }
+        read: { type: boolean }
+
+  responses:
+    BadRequest:
+      description: Malformed request (syntax, types, unknown fields, missing headers).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            malformed: { $ref: '#/components/examples/MalformedRequest' }
+    Unauthorized:
+      description: Authentication is missing, expired, or revoked.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, example: 'Bearer error="invalid_token"' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            required: { $ref: '#/components/examples/AuthenticationRequired' }
+            revoked: { $ref: '#/components/examples/SessionRevoked' }
+    NotFound:
+      description: Resource does not exist or the caller has no relationship to it.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            notFound: { $ref: '#/components/examples/ResourceNotFound' }
+    PreconditionFailed:
+      description: The If-Match ETag is stale; re-read the resource and retry.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            versionMismatch: { $ref: '#/components/examples/VersionMismatch' }
+    PreconditionRequired:
+      description: The If-Match header is required for this operation.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            required: { $ref: '#/components/examples/PreconditionRequired' }
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+        RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+        RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            rateLimited: { $ref: '#/components/examples/RateLimited' }
+
+  examples:
+    MalformedRequest:
+      value:
+        type: https://deaddrop.example/errors/malformed-request
+        title: Malformed request
+        status: 400
+        code: MALFORMED_REQUEST
+        detail: Request body is not valid JSON.
+        instance: /api/v1/capsules
+        traceId: 4bf92f3577b34da6
+    WeakPassword:
+      value:
+        type: https://deaddrop.example/errors/validation-failed
+        title: Validation failed
+        status: 422
+        code: WEAK_PASSWORD
+        detail: The password does not meet the strength policy.
+        instance: /api/v1/auth/register
+        traceId: 1a2b3c4d5e6f7a8b
+        errors:
+          - field: /password
+            code: TOO_COMMON
+            message: The password appears in a list of breached passwords.
+    EmailAlreadyVerified:
+      value:
+        type: https://deaddrop.example/errors/email-already-verified
+        title: Email already verified
+        status: 409
+        code: EMAIL_ALREADY_VERIFIED
+        traceId: 9c8b7a6f5e4d3c2b
+    TokenExpired:
+      value:
+        type: https://deaddrop.example/errors/token-expired
+        title: Token expired or invalid
+        status: 422
+        code: TOKEN_EXPIRED
+        detail: Request a new verification email.
+        traceId: 0f1e2d3c4b5a6978
+    InvalidCredentials:
+      value:
+        type: https://deaddrop.example/errors/invalid-credentials
+        title: Invalid email or password
+        status: 401
+        code: INVALID_CREDENTIALS
+        traceId: 7d6c5b4a39281706
+    AuthenticationRequired:
+      value:
+        type: https://deaddrop.example/errors/authentication-required
+        title: Authentication required
+        status: 401
+        code: AUTHENTICATION_REQUIRED
+        traceId: 5e4d3c2b1a090807
+    SessionRevoked:
+      value:
+        type: https://deaddrop.example/errors/session-revoked
+        title: Session revoked
+        status: 401
+        code: SESSION_REVOKED
+        detail: Sign in again.
+        traceId: 6a5b4c3d2e1f0a9b
+    CsrfFailed:
+      value:
+        type: https://deaddrop.example/errors/csrf-failed
+        title: CSRF validation failed
+        status: 403
+        code: CSRF_FAILED
+        traceId: 2c3d4e5f6a7b8c9d
+    EmailNotVerified:
+      value:
+        type: https://deaddrop.example/errors/email-not-verified
+        title: Email not verified
+        status: 403
+        code: EMAIL_NOT_VERIFIED
+        detail: Verify your email before creating or activating capsules.
+        traceId: 3d4e5f6a7b8c9d0e
+    AccountSuspended:
+      value:
+        type: https://deaddrop.example/errors/account-suspended
+        title: Account suspended
+        status: 403
+        code: ACCOUNT_SUSPENDED
+        traceId: 4e5f6a7b8c9d0e1f
+    AccountNotSuspended:
+      value:
+        type: https://deaddrop.example/errors/account-not-suspended
+        title: Account is not suspended
+        status: 409
+        code: ACCOUNT_NOT_SUSPENDED
+        traceId: 5f6a7b8c9d0e1f2a
+    AdminRequired:
+      value:
+        type: https://deaddrop.example/errors/admin-required
+        title: Administrator role required
+        status: 403
+        code: ADMIN_REQUIRED
+        traceId: 6a7b8c9d0e1f2a3b
+    NotDesignatedApprover:
+      value:
+        type: https://deaddrop.example/errors/not-designated-approver
+        title: Not a designated approver
+        status: 403
+        code: NOT_DESIGNATED_APPROVER
+        traceId: 7b8c9d0e1f2a3b4c
+    OwnerCannotApprove:
+      value:
+        type: https://deaddrop.example/errors/validation-failed
+        title: Validation failed
+        status: 422
+        code: OWNER_CANNOT_APPROVE
+        traceId: 8c9d0e1f2a3b4c5d
+        errors:
+          - field: /approvers/0
+            code: OWNER_CANNOT_APPROVE
+            message: The owner cannot be an approver of their own capsule.
+    ResourceNotFound:
+      value:
+        type: https://deaddrop.example/errors/resource-not-found
+        title: Resource not found
+        status: 404
+        code: RESOURCE_NOT_FOUND
+        instance: /api/v1/capsules/0b9f0e1c-5d1a-4c2e-9a77-2f7f6a0a1b2c
+        traceId: 9d0e1f2a3b4c5d6e
+    CapsuleAlreadyReleased:
+      value:
+        type: https://deaddrop.example/errors/capsule-already-released
+        title: Capsule already released
+        status: 409
+        code: CAPSULE_ALREADY_RELEASED
+        detail: Released capsules are immutable and cannot be paused or relocked.
+        traceId: 0e1f2a3b4c5d6e7f
+    CapsuleAlreadyActive:
+      value:
+        type: https://deaddrop.example/errors/capsule-already-active
+        title: Capsule already active
+        status: 409
+        code: CAPSULE_ALREADY_ACTIVE
+        traceId: 1f2a3b4c5d6e7f80
+    CapsuleNotActive:
+      value:
+        type: https://deaddrop.example/errors/capsule-not-active
+        title: Capsule is not active
+        status: 409
+        code: CAPSULE_NOT_ACTIVE
+        traceId: 2a3b4c5d6e7f8091
+    CapsuleLocked:
+      value:
+        type: https://deaddrop.example/errors/capsule-locked
+        title: Capsule is still locked
+        status: 403
+        code: CAPSULE_LOCKED
+        detail: Content becomes available when the owner's release conditions are met.
+        traceId: 3b4c5d6e7f8091a2
+    AccessRemoved:
+      value:
+        type: https://deaddrop.example/errors/access-removed
+        title: Access removed
+        status: 403
+        code: ACCESS_REMOVED
+        traceId: 4c5d6e7f8091a2b3
+    ActivationStale:
+      value:
+        type: https://deaddrop.example/errors/activation-stale
+        title: Approval request is outdated
+        status: 409
+        code: ACTIVATION_STALE
+        detail: The capsule was changed and reactivated; use the latest approval request.
+        traceId: 5d6e7f8091a2b3c4
+    ActiveCapsuleLimit:
+      value:
+        type: https://deaddrop.example/errors/active-capsule-limit
+        title: Active capsule limit reached
+        status: 409
+        code: ACTIVE_CAPSULE_LIMIT
+        detail: Pause or delete an active capsule before activating another.
+        traceId: 6e7f8091a2b3c4d5
+    IdempotencyKeyReused:
+      value:
+        type: https://deaddrop.example/errors/idempotency-key-reused
+        title: Idempotency key reused with a different request
+        status: 409
+        code: IDEMPOTENCY_KEY_REUSED
+        traceId: 7f8091a2b3c4d5e6
+    VersionMismatch:
+      value:
+        type: https://deaddrop.example/errors/version-mismatch
+        title: Capsule was modified concurrently
+        status: 412
+        code: VERSION_MISMATCH
+        detail: Reload the capsule and reapply your changes.
+        traceId: 8091a2b3c4d5e6f7
+    PreconditionRequired:
+      value:
+        type: https://deaddrop.example/errors/precondition-required
+        title: If-Match header required
+        status: 428
+        code: PRECONDITION_REQUIRED
+        traceId: 91a2b3c4d5e6f708
+    MessageTooLong:
+      value:
+        type: https://deaddrop.example/errors/validation-failed
+        title: Validation failed
+        status: 422
+        code: MESSAGE_TOO_LONG
+        traceId: a2b3c4d5e6f70819
+        errors:
+          - field: /message
+            code: MAX_LENGTH
+            message: The message must not exceed 20000 characters.
+    ReleaseDateInPast:
+      value:
+        type: https://deaddrop.example/errors/validation-failed
+        title: Validation failed
+        status: 422
+        code: RELEASE_DATE_IN_PAST
+        traceId: b3c4d5e6f708192a
+        errors:
+          - field: /policy/releaseAt
+            code: MUST_BE_FUTURE
+            message: The release date must be in the future and within five years.
+    PolicyIncomplete:
+      value:
+        type: https://deaddrop.example/errors/validation-failed
+        title: Validation failed
+        status: 422
+        code: POLICY_INCOMPLETE
+        traceId: c4d5e6f708192a3b
+        errors:
+          - field: /recipients
+            code: REQUIRED
+            message: At least one recipient is required.
+          - field: /policy/conditions
+            code: REQUIRED
+            message: Select at least one release condition.
+    RateLimited:
+      value:
+        type: https://deaddrop.example/errors/rate-limited
+        title: Too many requests
+        status: 429
+        code: RATE_LIMITED
+        detail: Try again in 30 seconds.
+        traceId: d5e6f708192a3b4c
+        retryAfter: 30
