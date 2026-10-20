@@ -1,0 +1,14 @@
+digraph Context {
+  graph [rankdir=TB, bgcolor="white", pad="0.25", nodesep="0.45", ranksep="0.6", fontname="Helvetica", label="Dead Drop | system context", labelloc=t, fontsize=20];
+  node [shape=box, style="rounded,filled", fillcolor="#F1F5F9", color="#94A3B8", fontname="Helvetica", fontsize=13, margin="0.18,0.14"];
+  edge [fontname="Helvetica", fontsize=11, color="#64748B", arrowsize=0.7];
+  people [label="Browser participants\nOwner / Recipient / Approver"];
+  admin [label="Administrator\nOperational dashboard"];
+  system [label="Dead Drop\nResponsive web application\n+ release processing", fillcolor="#DBEAFE", color="#2563EB"];
+  smtp [label="SMTP service\nLocal email sink in demos"];
+  backup [label="Off-host encrypted backups\n+ protected recovery records"];
+  people -> system [label="HTTPS\nrole-based actions"];
+  admin -> system [label="HTTPS\nmetadata / suspension / retries"];
+  system -> smtp [label="Generic notices\n(no capsule text)"];
+  system -> backup [label="Backup / reconciliation", dir=both];
+}

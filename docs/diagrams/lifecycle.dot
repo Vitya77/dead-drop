@@ -1,0 +1,18 @@
+digraph Lifecycle {
+  graph [rankdir=LR, bgcolor="white", pad="0.25", nodesep="0.4", ranksep="0.8", fontname="Helvetica", label="Warning progress belongs to inactivity; it is not a lifecycle state.", labelloc=b, fontsize=13];
+  node [shape=box, style="rounded,filled", fillcolor="#F1F5F9", color="#94A3B8", fontname="Helvetica", fontsize=14, margin="0.2,0.16"];
+  edge [fontname="Helvetica", fontsize=11, color="#64748B", arrowsize=0.7];
+  draft [label="Draft"];
+  active [label="Active", fillcolor="#DBEAFE", color="#2563EB"];
+  paused [label="Paused"];
+  released [label="Released\nImmutable content", fillcolor="#DCFCE7", color="#16A34A"];
+  deleted [label="Deleted\nAccess denied", fillcolor="#FEE2E2", color="#DC2626"];
+  draft -> active [label="Validate + confirm"];
+  active -> paused [label="Edit / pause /\nowner suspension"];
+  paused -> active [label="Explicit reactivation\nFresh timers + approvals"];
+  active -> released [label="Current gates +\nALL/ANY satisfied"];
+  draft -> deleted [label="Owner deletion"];
+  paused -> deleted [label="Owner deletion"];
+  active -> deleted [label="Owner deletion"];
+  released -> deleted [label="Owner deletion"];
+}

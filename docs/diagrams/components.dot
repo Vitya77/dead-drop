@@ -1,0 +1,32 @@
+digraph Components {
+  graph [rankdir=TB, bgcolor="white", pad="0.2", nodesep="0.35", ranksep="0.55", fontname="Helvetica", fontsize=18];
+  node [shape=box, style="rounded,filled", fillcolor="#F1F5F9", color="#94A3B8", fontname="Helvetica", fontsize=12, margin="0.16,0.12"];
+  edge [fontname="Helvetica", fontsize=10, color="#64748B", arrowsize=0.65];
+  browser [label="Browser\nAccess token in memory\nHttpOnly refresh cookie"];
+  subgraph cluster_host {
+    label="Single Docker Compose host"; color="#CBD5E1"; style=rounded; fontname="Helvetica";
+    proxy [label="Reverse proxy\nOne HTTPS origin", fillcolor="#DBEAFE", color="#2563EB"];
+    next [label="Next.js\nResponsive UI"];
+    api [label="Django REST Framework\nIdentity / domain rules / authorization", fillcolor="#DBEAFE", color="#2563EB"];
+    db [label="PostgreSQL\nAuthoritative content + state\nSessions / notices / pending work", shape=cylinder];
+    redis [label="Redis\nCelery broker", shape=cylinder];
+    beat [label="One Celery Beat\nPeriodic evaluation / recovery"];
+    worker [label="Celery workers\nShared Django domain rules\nEvaluation / delivery / cleanup"];
+    sink [label="Demo email sink\nLocal SMTP capture"];
+    {rank=same; next; api;}
+    {rank=same; db; redis; beat;}
+    proxy -> next [label="UI"];
+    proxy -> api [label="/api"];
+    api -> db [label="Atomic commands", dir=both];
+    api -> redis [label="Dispatch after commit"];
+    beat -> redis [label="Scan requests"];
+    redis -> worker [label="Repeatable tasks"];
+    worker -> db [label="Evaluate / reconcile / commit", dir=both];
+    worker -> sink [label="Demo SMTP"];
+  }
+  smtp [label="Deployed SMTP\nExternal email service"];
+  backups [label="Off-host encrypted backups\nProtected recovery records"];
+  browser -> proxy [label="HTTPS"];
+  worker -> smtp [label="Generic notices"];
+  db -> backups [label="Backup / restore", dir=both];
+}

@@ -11,6 +11,14 @@ Possible unlock conditions may include:
 
 The main idea is to allow users to securely prepare information for future delivery without giving recipients immediate access to it.
 
+## Documentation
+
+The course MVP supports plain-text messages; file attachments remain part of the broader product vision.
+
+* [Software Requirements Specification (Markdown)](docs/srs.md)
+* [Software Requirements Specification (PDF)](output/pdf/dead-drop-srs.pdf)
+* [Documentation export and validation](docs/EXPORT.md)
+
 ## Team
 
 Developed as a team project for the **Object-Oriented Analysis and Software Design** course.
