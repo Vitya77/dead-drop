@@ -18,6 +18,9 @@ The course MVP supports plain-text messages; file attachments remain part of the
 * [Software Requirements Specification (Markdown)](docs/srs.md)
 * [Software Requirements Specification (PDF)](output/pdf/dead-drop-srs.pdf)
 * [Documentation export and validation](docs/EXPORT.md)
+* [Architecture and key flows](docs/architecture.md)
+* [Error handling design](docs/error-handling.md) and [OpenAPI specification](docs/api/openapi.yaml) ([Swagger UI](docs/api/index.html))
+* [Concurrency and distributed patterns](docs/concurrency.md)
 
 ## Team
 
